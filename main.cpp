@@ -87,7 +87,7 @@ T generate_message()
 }
 
 template <typename T>
-void writer(const std::shared_ptr<SharedState<T>> state, const int iterations, const int cpu_id,
+void writer(const std::shared_ptr<SharedState<T>> state, const size_t iterations, const int cpu_id,
             std::vector<timespec>& times)
 {
     timespec time;
@@ -107,7 +107,7 @@ void writer(const std::shared_ptr<SharedState<T>> state, const int iterations, c
 DoubleCacheLineMessage out;
 
 template <typename T>
-void reader(const std::shared_ptr<SharedState<T>> state, int iterations, int cpu_id, std::vector<timespec>& times)
+void reader(const std::shared_ptr<SharedState<T>> state, size_t iterations, int cpu_id, std::vector<timespec>& times)
 {
     timespec time;
     set_affinity(cpu_id);
@@ -124,11 +124,6 @@ void reader(const std::shared_ptr<SharedState<T>> state, int iterations, int cpu
     }
 }
 
-size_t duration_between_ns(const timespec& start, const timespec& end)
-{
-    return (end.tv_sec - start.tv_sec) * 1'000'000'000ULL + (end.tv_nsec - start.tv_nsec);
-}
-
 struct BenchmarkResult
 {
     size_t median;
@@ -138,28 +133,42 @@ struct BenchmarkResult
 
 void print_results(const std::vector<std::vector<BenchmarkResult>>& results)
 {
-    std::cout << "Benchmark results (median/p90/p95) in nanoseconds:\n";
+    std::cout << "Benchmark results (median/p90/p95) in nanoseconds:\nfrom\\to ";
     for (size_t i = 0; i < results.size(); ++i)
     {
+        std::cout << std::setw(14) << i << "   ";
+    }
+    std::cout << std::endl;
+    for (size_t i = 0; i < results.size(); ++i)
+    {
+        std::cout << std::setw(7) << i << " ";
+        ;
         for (size_t j = 0; j < results[i].size(); ++j)
         {
+            BenchmarkResult res;
             if (i == j)
             {
-                continue;
+                res = BenchmarkResult{0, 0, 0};
             }
-            std::cout << std::format("cpu{} to cpu{} = {}/{}/{}\n", i, j, results[i][j].median, results[i][j].p90,
-                                     results[i][j].p95);
+            else
+            {
+                res = results[i][j];
+            }
+            std::cout << std::format("{:>4}/{:>4}/{:>4}   ", res.median, res.p90, res.p95);
         }
+        std::cout << std::endl;
     }
 }
 
-BenchmarkResult calculate_timings(const std::vector<timespec>& send_times, const std::vector<timespec>& receive_times,
-                                  size_t skip_first_n)
+BenchmarkResult calculate_timings(const std::vector<timespec>& send_times, const std::vector<timespec>& receive_times)
 {
-    std::vector<uint64_t> durations(send_times.size() - skip_first_n);
+    static constexpr uint64_t kNanosInSec = 1'000'000'000;
+    std::vector<uint64_t> durations(send_times.size());
     for (size_t i = 0; i < durations.size(); ++i)
     {
-        durations[i] = duration_between_ns(send_times[i + skip_first_n], receive_times[i + skip_first_n]);
+
+        durations[i] = (receive_times[i].tv_sec - send_times[i].tv_sec) * kNanosInSec +
+            (receive_times[i].tv_nsec - send_times[i].tv_nsec);
     }
     std::sort(durations.begin(), durations.end());
     return BenchmarkResult{.median = durations[durations.size() / 2],
@@ -168,7 +177,7 @@ BenchmarkResult calculate_timings(const std::vector<timespec>& send_times, const
 }
 
 template <typename T>
-void benchmark(size_t num_threads, size_t iterations, size_t skip_first_n)
+void benchmark(const size_t num_threads, const size_t iterations)
 {
     std::vector<timespec> send_times(iterations);
     std::vector<timespec> receive_times(iterations);
@@ -185,14 +194,14 @@ void benchmark(size_t num_threads, size_t iterations, size_t skip_first_n)
             }
             std::shared_ptr<SharedState<T>> state = std::make_shared<SharedState<T>>();
 
-            std::thread t1(writer<T>, state, iterations, reader_cpu, std::ref(send_times));
-            std::thread t2(reader<T>, state, iterations, writer_cpu, std::ref(receive_times));
+            std::thread writer_thread(writer<T>, state, iterations, writer_cpu, std::ref(send_times));
+            std::thread reader_thread(reader<T>, state, iterations, reader_cpu, std::ref(receive_times));
 
-            t1.join();
-            t2.join();
+            writer_thread.join();
+            reader_thread.join();
 
 
-            results[writer_cpu][reader_cpu] = calculate_timings(send_times, receive_times, skip_first_n);
+            results[writer_cpu][reader_cpu] = calculate_timings(send_times, receive_times);
         }
     }
 
@@ -201,19 +210,18 @@ void benchmark(size_t num_threads, size_t iterations, size_t skip_first_n)
 
 int main()
 {
-    constexpr size_t iterations = 1000;
-    constexpr size_t skip_first_n = 100;
+    constexpr size_t iterations = 10000;
 
     // Generate seed for rand().
     // Used only for generating message data. Problems with randomness doesn't really matter here.
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
     size_t num_threads = std::thread::hardware_concurrency();
 
-    std::cout << "Running benchmark sending single cache line message between CPUs" << std::endl;
-    benchmark<SingleCacheLineMessage>(num_threads, iterations, skip_first_n);
+    std::cout << "Running benchmark sending SINGLE cache line message between CPUs" << std::endl;
+    benchmark<SingleCacheLineMessage>(num_threads, iterations);
 
-    std::cout << "Running benchmark sending double cache line message between CPUs" << std::endl;
-    benchmark<DoubleCacheLineMessage>(num_threads, iterations, skip_first_n);
+    std::cout << "\nRunning benchmark sending DOUBLE cache line message between CPUs" << std::endl;
+    benchmark<DoubleCacheLineMessage>(num_threads, iterations);
 
 
     return 0;
